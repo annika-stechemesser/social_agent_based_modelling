@@ -2,6 +2,7 @@ using Agents
 using Statistics
 using InteractiveDynamics
 using GLMakie
+using Distributions
 
 @agent homoOeconomicus GridAgent{2} begin
     kilometersPerYear::Float64
@@ -12,6 +13,7 @@ using GLMakie
     budget::Float64
     affinity::Float64
     affinity_old::Float64
+    vehicle_preference_rational::Int
 end
 
 function modelHomoOeconomicus(
@@ -24,7 +26,10 @@ function modelHomoOeconomicus(
     maintenanceCostCombustionKM = 0.005,
     maintenanceCostElectricKM = 0.01,
     usedVehicleDiscount::Float64 = 0.8, #assumption: loss of 20% of vehicle value due to used vehicle market conditions
-    budget = 1000000 # for now only dummy implementation
+    budget = 1000000,# for now only dummy implementation
+    affinity_distribution = Bernoulli(0.5),
+    tau_rational = 3, #inertia for the rational part
+    tau_social_affinity = 3 #intertia for the social part # specify a distribution from which the starting affinity should be drawn. Default is all combustion.
 )
     model = ABM(
         homoOeconomicus,
@@ -38,12 +43,15 @@ function modelHomoOeconomicus(
             :maintenanceCostCombustionKM => maintenanceCostCombustionKM,
             :maintenanceCostElectricKM => maintenanceCostElectricKM,
             :usedVehicleDiscount => usedVehicleDiscount,
-            :budget => budget # assumtpion for now: uniform budget
+            :budget => budget,
+            :tau_rational => tau_rational,
+            :tau_social_affinity => tau_social_affinity # assumtpion for now: uniform budget
         ),
     )
     for i = 1:numagents
         kilometersPerYear = 15000 + (7500 * (rand(model.rng) - 0.5)) #  diverse population with different millages
-        initialVehicle = 1 # population of combustion engine owners
+        starting_affinity = rand(affinity_distribution,1)[1]+1 #get probability for affinity between 0 and 1, add 1 to take it to range 1-2
+        initialVehicle = starting_affinity #experiment with everyone starting with their preference
         initialValue = 0.0
         if initialVehicle == 1
             initialValue = priceCombustionVehicle
@@ -59,8 +67,9 @@ function modelHomoOeconomicus(
             initialValue,
             0,
             budget,
+            starting_affinity,
+            starting_affinity,
             1,
-            1
         )
     end
     return model
@@ -154,7 +163,7 @@ function agent_step!(agent, model)
     #assumption: all vehicles are assumed to last at least 300.000km before purchase of a new vehicle
     feasibleYears = cld(300000, agent.kilometersPerYear) # rounding up division
     new_vehicle, vehicle_preference = rationalDecision(agent.vehicleAge,feasibleYears,agent.kilometersPerYear,agent.vehicle,agent.vehicleValue,agent.budget,model)
-
+    agent.vehicle_preference_rational = vehicle_preference
     #find neighbouring agents
     neighbours = nearby_agents(agent.pos,model,1)
     #compute the influence
@@ -163,17 +172,14 @@ function agent_step!(agent, model)
         influence += 0.2*(n.affinity_old-agent.affinity_old)
     end
 
-    #set tau_pa to 3 at the moment
-    tau_pa=3
-    tau_a=3
-    influence = influence/tau_pa
+    influence = influence/model.tau_social_affinity
     #store previous affinity
     agent.affinity_old = agent.affinity
     #compute new affinity
-    agent.affinity = agent.affinity_old + ((vehicle_preference-agent.affinity_old)/tau_a+influence)
+    agent.affinity = agent.affinity_old + (vehicle_preference-agent.affinity_old)/model.tau_rational+influence
 
     if (new_vehicle == true)
-        if (agent.affinity<=1.5)
+        if (agent.affinity<1.5)
             agent.vehicle = 1
             agent.vehicleValue = model.priceCombustionVehicle
             agent.purchaseValue = model.priceCombustionVehicle
@@ -199,9 +205,12 @@ function model_step!(model)
     end
 end
 
+
+## plot some experiments
+# Lennarts initial data exploration
 gaiaOeconomicus = modelHomoOeconomicus()
 
-Agents.step!(gaiaOeconomicus, agent_step!, model_step!, 1)
+Agents.step!(gaiaOeconomicus_equal, agent_step!, model_step!, 1)
 
 
 parange = Dict(
@@ -227,4 +236,43 @@ scene, adf, modeldf = abm_data_exploration(
     as = 4,
     adata = adata,
     alabels = alabels,
+)
+
+
+# Additional data exploration
+# try out an equal opportunity world, initial affinity is bernoulli distributed with p = 0.5, everyone starts with the car matching their affinity
+parange = Dict(
+    :priceCombustionVehicle => 5000:100000,
+    :priceElectricVehicle => 5000:100000,
+    :fuelCostKM => range(0.05, 0.5; step = 0.025),
+    :powerCostKM => range(0.05, 0.5; step = 0.025),
+    :tau_rational => range(1,10; step = 1),
+    :tau_social_affinity => range(1,10; step = 1)
+)
+gaiaOeconomicus_equal = modelHomoOeconomicus(priceCombustionVehicle = 15000,priceElectricVehicle = 15000,fuelCostKM = 0.1,powerCostKM = 0.1,maintenanceCostCombustionKM = 0.005,maintenanceCostElectricKM = 0.005,affinity_distribution = Bernoulli(0.5))
+
+adata = [(:affinity, mean), (:vehicle, mean), (:vehicle_preference_rational, mean)]
+alabels = ["avg. affinity", "avg. vehicle", "avg. rational decision"]
+
+vehiclecolor(a) = a.vehicle == 1 ? :orange : :blue
+vehiclemarker(a) = a.vehicle == 1 ? :circle : :rect
+
+scene, adf, modeldf = abm_data_exploration(
+    gaiaOeconomicus_equal,
+    agent_step!,
+    model_step!,
+    parange;
+    ac = vehiclecolor,
+    am = vehiclemarker,
+    as = 4,
+    adata = adata,
+    alabels = alabels,
+)
+
+
+abm_video(
+    "affinity.mp4", gaiaOeconomicus_equal, agent_step!;
+    ac = vehiclecolor, am = vehiclemarker, as = 4,
+    framerate = 4, frames = 100,
+    title = "Car decision model"
 )
